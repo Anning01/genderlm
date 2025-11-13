@@ -667,9 +667,8 @@ detector = FaceDetector(det_thresh=0.6)
 
 如有问题或建议，欢迎通过以下方式联系：
 
-- 📧 Email: [your-email@example.com]
-- 💬 Issue: [GitHub Issues](your-repo-url/issues)
-- 🐦 Twitter: [@your-twitter]
+- 📧 Email: [anningforchina@gmail.com]
+- 💬 Issue: [GitHub Issues](https://github.com/Anning01/genderlm/issues)
 
 ---
 
@@ -677,7 +676,7 @@ detector = FaceDetector(det_thresh=0.6)
 
 **⭐ 如果这个项目对您有帮助，请给个 Star！**
 
-Made with ❤️ by [Your Name]
+Made with ❤️ by [Anning]
 
 </div>
 
