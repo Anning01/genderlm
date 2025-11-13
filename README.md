@@ -1,5 +1,3 @@
-GenderLM 大模型 识别 图像中的性别
-
 <div align="center">
 
 **基于 Vision Transformer 的高精度性别识别系统**
