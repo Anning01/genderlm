@@ -47,7 +47,7 @@
 
 ```bash
 # 1. 克隆项目
-git clone <your-repo-url>
+git clone https://github.com/Anning01/genderlm.git
 cd GenderLM
 
 # 2. 下载性别识别模型
@@ -390,7 +390,6 @@ GenderLM/
 ├── face_detector.py             # 人脸检测模块（InsightFace）
 ├── pyproject.toml               # 项目依赖配置
 ├── README.md                    # 项目文档
-├── CLAUDE.md                    # Claude Code 开发文档
 ├── docs/                        # 文档和截图
 │   ├── gradio页面.png          # WebUI 主界面截图
 │   └── gradio识别成功.png      # 识别成功示例
