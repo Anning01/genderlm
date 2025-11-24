@@ -1,51 +1,76 @@
 """Face detection and cropping utilities."""
-from typing import Optional
-
 import numpy as np
+import threading
 from PIL import Image
 from insightface.app import FaceAnalysis
+from typing import Optional, Tuple, List
 
 
 class FaceDetector:
     """Face detector using InsightFace."""
 
-    def __init__(
-        self,
-        model_name: str = 'buffalo_s',
-        providers: Optional[list] = None,
-        det_size: tuple = (640, 640),
-        det_thresh: float = 0.5
-    ):
+    def __init__(self, model_name: str = 'buffalo_s', providers: Optional[list] = None, det_size: tuple = (224, 224)):
         """Initialize face detector.
 
         Args:
             model_name: InsightFace model name (default: buffalo_s)
-            providers: ONNX runtime providers (default: ['CUDAExecutionProvider', 'CPUExecutionProvider'])
-            det_size: Detection size (default: (640, 640))
-            det_thresh: Detection threshold, lower = more sensitive (default: 0.5, range: 0.0-1.0)
+            providers: ONNX runtime providers (default: auto-detect CUDA)
+            det_size: Detection size (default: (224, 224), smaller = faster but may miss faces)
         """
+        self.model_lock = threading.Lock()
+        
+        # Auto-detect CUDA support if providers not specified
+        if providers is None:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+                    print("🚀 FaceDetector: Using CUDA for face detection")
+                else:
+                    providers = ['CPUExecutionProvider']
+                    print("⚠️  FaceDetector: CUDA not available, using CPU")
+            except ImportError:
+                providers = ['CPUExecutionProvider']
+                print("⚠️  FaceDetector: PyTorch not found, using CPU")
+
         self.model = FaceAnalysis(name=model_name, providers=providers)
-        self.model.prepare(ctx_id=0, det_size=det_size, det_thresh=det_thresh)
+        # Use smaller det_size for better detection (same as 性别检测.py)
+        # ctx_id=0 for GPU, ctx_id=-1 for CPU
+        try:
+            self.model.prepare(ctx_id=0, det_size=det_size)
+            print(f"✓ FaceDetector initialized with det_size={det_size}, ctx_id=0 (GPU)")
+        except Exception as e:
+            print(f"⚠️  GPU initialization failed ({e}), falling back to CPU")
+            self.model.prepare(ctx_id=-1, det_size=det_size)
+            print(f"✓ FaceDetector initialized with det_size={det_size}, ctx_id=-1 (CPU)")
 
     def detect(self, image: Image.Image, max_num: int = 1):
         """Detect faces in image.
 
         Args:
-            image: PIL Image (RGB format)
+            image: PIL Image
             max_num: Maximum number of faces to detect (0 = unlimited)
 
         Returns:
             List of face objects with bbox and landmarks
         """
+        # Ensure image is in RGB mode (handle P, L, RGBA modes)
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+
         # Convert PIL Image (RGB) to numpy array
         img_array = np.array(image)
 
         # InsightFace expects BGR format (OpenCV convention)
         # Convert RGB to BGR
-        if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-            img_array = img_array[:, :, ::-1]  # RGB -> BGR
+        img_array = img_array[:, :, ::-1].copy()  # RGB -> BGR, copy to ensure contiguous
 
-        faces = self.model.get(img_array, max_num=max_num)
+        with self.model_lock:
+            faces = self.model.get(img_array, max_num=max_num)
+
+        # Free numpy array memory
+        del img_array
+
         return faces
 
     @staticmethod
@@ -149,6 +174,41 @@ class FaceDetector:
         else:
             return self.crop_face_with_landmarks(image, face, scale)
 
+    def detect_and_crop_all(
+        self,
+        image: Image.Image,
+        use_bbox: bool = True,
+        scale: float = 1.2,
+        max_num: int = 0
+    ) -> Tuple[List[Image.Image], List]:
+        """Detect all faces and return list of cropped images.
+
+        Args:
+            image: PIL Image
+            use_bbox: Use bbox-based cropping if True, else use landmark-based
+            scale: Scale factor for crop area
+            max_num: Maximum number of faces to detect (0 = unlimited)
+
+        Returns:
+            Tuple of (cropped_images_list, faces_info_list)
+            - cropped_images_list: List of cropped PIL Images
+            - faces_info_list: List of face objects with bbox and landmarks
+            Returns ([], []) if no faces detected
+        """
+        faces = self.detect(image, max_num=max_num)
+        if not faces:
+            return [], []
+
+        cropped_images = []
+        for face in faces:
+            if use_bbox:
+                cropped = self.crop_face_square(image, face.bbox, scale)
+            else:
+                cropped = self.crop_face_with_landmarks(image, face, scale)
+            cropped_images.append(cropped)
+
+        return cropped_images, faces
+
 
 
 if __name__ == '__main__':
@@ -159,108 +219,93 @@ if __name__ == '__main__':
     print("Face Detector Test")
     print("=" * 60)
 
+    # Initialize detector
+    print("\n1. 初始化人脸检测器...")
+    start_time = time.time()
+    detector = FaceDetector()
+    init_time = time.time() - start_time
+    print(f"   ✓ 人脸检测器加载完成 (耗时: {init_time:.3f}秒)")
+    
     # Test images
     test_images = [
-        "gender-classification-2/images/male.jpg",
+        # "example/avatar_f.png",
+        # "example/avatar_w.png",
+        # "example/avatar_team.png",
+        "example/img.png"
     ]
+    
+    for img_path in test_images:
+        if not os.path.exists(img_path):
+            print(f"\n⚠ 警告: {img_path} 不存在, 跳过中...")
+            continue
 
-    # Test with different detection thresholds
-    thresholds = [0.5, 0.3]  # Default and more sensitive
+        img_start_time = time.time()
+        print(f"\n2. 处理图片: {img_path}")
+        print("-" * 60)
 
-    for thresh in thresholds:
-        print(f"\n{'=' * 60}")
-        print(f"Testing with detection threshold: {thresh}")
-        print(f"{'=' * 60}")
+        # Load image
+        load_start = time.time()
+        image = Image.open(img_path)
+        load_time = time.time() - load_start
+        print(f"   图像大小: {image.size} (加载耗时: {load_time:.5f}秒)")
 
-        # Initialize detector
-        print(f"\n1. 初始化人脸检测器 (阈值={thresh})...")
-        start_time = time.time()
-        detector = FaceDetector(det_thresh=thresh)
-        init_time = time.time() - start_time
-        print(f"   ✓ 人脸检测器加载完成 (耗时: {init_time:.3f}秒)")
+        # Detect faces
+        detect_start = time.time()
+        faces = detector.detect(image, max_num=0)  # Detect all faces
+        detect_time = time.time() - detect_start
+        print(f"   检测到的人脸: {len(faces)} (检测耗时: {detect_time:.5f}秒)")
+        
+        if len(faces) == 0:
+            print("   ✗ 未检测到人脸")
+            continue
+        
+        # Display face info
+        for i, face in enumerate(faces):
+            bbox = face.bbox.astype(int)
+            print(f"\n   Face {i+1}:")
+            print(f"     - Bounding box: {bbox}")
+            if hasattr(face, 'kps') and face.kps is not None:
+                print(f"     - Landmarks: {face.kps.shape[0]} points")
+                landmark_center = (int(face.kps[:, 0].mean()), int(face.kps[:, 1].mean()))
+                print(f"     - Landmark center: {landmark_center}")
+        
+        # Test cropping methods
+        face = faces[0]  # Use first face
 
-        for img_path in test_images:
-            if not os.path.exists(img_path):
-                print(f"\n⚠ 警告: {img_path} 不存在, 跳过中...")
-                continue
+        # Method 1: Bbox-based crop
+        print("\n   测试基于bbox的裁剪...")
+        crop_start = time.time()
+        cropped_bbox = detector.crop_face_square(image, face.bbox, scale=1.2)
+        crop_time = time.time() - crop_start
+        output_bbox = img_path.replace(".png", "_crop_bbox.png")
+        cropped_bbox.save(output_bbox)
+        print(f"     ✓ 保存至: {output_bbox} (耗时: {crop_time:.5f}秒)")
+        print(f"     大小: {cropped_bbox.size}")
 
-            img_start_time = time.time()
-            print(f"\n2. 处理图片: {img_path}")
-            print("-" * 60)
+        # Method 2: Landmark-based crop
+        print("\n   测试基于Landmark的裁剪...")
+        crop_start = time.time()
+        cropped_landmark = detector.crop_face_with_landmarks(image, face, scale=1.2)
+        crop_time = time.time() - crop_start
+        output_landmark = img_path.replace(".png", "_crop_landmark.png")
+        cropped_landmark.save(output_landmark)
+        print(f"     ✓ 保存至: {output_landmark} (耗时: {crop_time:.5f}秒)")
+        print(f"     大小: {cropped_landmark.size}")
 
-            # Load image
-            load_start = time.time()
-            image = Image.open(img_path)
-            load_time = time.time() - load_start
-            print(f"   图像大小: {image.size} (加载耗时: {load_time:.5f}秒)")
+        # Method 3: detect_and_crop convenience method
+        print("\n   测试detect_and_crop方法...")
+        crop_start = time.time()
+        cropped_auto = detector.detect_and_crop(image, use_bbox=True, scale=1.5)
+        crop_time = time.time() - crop_start
+        if cropped_auto:
+            output_auto = img_path.replace(".png", "_crop_auto.png")
+            cropped_auto.save(output_auto)
+            print(f"     ✓ 保存至: {output_auto} (耗时: {crop_time:.5f}秒)")
+            print(f"     大小: {cropped_auto.size}")
 
-            # Detect faces
-            detect_start = time.time()
-            faces = detector.detect(image, max_num=0)  # Detect all faces
-            detect_time = time.time() - detect_start
-            print(f"   检测到的人脸: {len(faces)} (检测耗时: {detect_time:.5f}秒)")
-
-            if len(faces) == 0:
-                print(f"   ✗ 未检测到人脸 (阈值={thresh})")
-                continue
-
-            # Display face info
-            for i, face in enumerate(faces):
-                bbox = face.bbox.astype(int)
-                print(f"\n   Face {i+1}:")
-                print(f"     - Bounding box: {bbox}")
-                print(f"     - Detection score: {face.det_score:.4f}")
-                if hasattr(face, 'kps') and face.kps is not None:
-                    print(f"     - Landmarks: {face.kps.shape[0]} points")
-                    landmark_center = (int(face.kps[:, 0].mean()), int(face.kps[:, 1].mean()))
-                    print(f"     - Landmark center: {landmark_center}")
-
-            # Test cropping only for first threshold to avoid duplicate outputs
-            if thresh == thresholds[0] and len(faces) > 0:
-                face = faces[0]  # Use first face
-
-                # Get base filename without extension
-                base_path = os.path.splitext(img_path)[0]
-                ext = os.path.splitext(img_path)[1]
-
-                # Method 1: Bbox-based crop
-                print("\n   测试基于bbox的裁剪...")
-                crop_start = time.time()
-                cropped_bbox = detector.crop_face_square(image, face.bbox, scale=1.2)
-                crop_time = time.time() - crop_start
-                output_bbox = f"{base_path}_crop_bbox{ext}"
-                cropped_bbox.save(output_bbox)
-                print(f"     ✓ 保存至: {output_bbox} (耗时: {crop_time:.5f}秒)")
-                print(f"     大小: {cropped_bbox.size}")
-
-                # Method 2: Landmark-based crop
-                print("\n   测试基于Landmark的裁剪...")
-                crop_start = time.time()
-                cropped_landmark = detector.crop_face_with_landmarks(image, face, scale=1.2)
-                crop_time = time.time() - crop_start
-                output_landmark = f"{base_path}_crop_landmark{ext}"
-                cropped_landmark.save(output_landmark)
-                print(f"     ✓ 保存至: {output_landmark} (耗时: {crop_time:.5f}秒)")
-                print(f"     大小: {cropped_landmark.size}")
-
-                # Method 3: detect_and_crop convenience method
-                print("\n   测试detect_and_crop方法...")
-                crop_start = time.time()
-                cropped_auto = detector.detect_and_crop(image, use_bbox=True, scale=1.5)
-                crop_time = time.time() - crop_start
-                if cropped_auto:
-                    output_auto = f"{base_path}_crop_auto{ext}"
-                    cropped_auto.save(output_auto)
-                    print(f"     ✓ 保存至: {output_auto} (耗时: {crop_time:.5f}秒)")
-                    print(f"     大小: {cropped_auto.size}")
-
-            img_total_time = time.time() - img_start_time
-            print(f"\n   >>> 该图片总耗时: {img_total_time:.5f}秒 <<<")
-
+        img_total_time = time.time() - img_start_time
+        print(f"\n   >>> 该图片总耗时: {img_total_time:.5f}秒 <<<")
+    
     print("\n" + "=" * 60)
     print("✓ 测试完成!")
-    print("\n💡 建议:")
-    print("  - 如果某些图片检测不到人脸，尝试降低 det_thresh (0.3 或更低)")
-    print("  - 如果检测到太多误报，尝试提高 det_thresh (0.6 或更高)")
-    print("  - 默认推荐值: 0.5")
     print("=" * 60)
