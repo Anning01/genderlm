@@ -39,7 +39,7 @@ def draw_bbox(image, bbox, label):
 
 def predict_single(image, use_face_detection):
     if image is None:
-        return None, "Please upload an image."
+        return None, "Please upload an image.", None
     
     image = image.convert("RGB")
     info_text = ""
@@ -55,9 +55,11 @@ def predict_single(image, use_face_detection):
             info_text += f"Whole Image:\nGender: {pred['gender']} ({pred['gender_confidence']:.2f})\nAge: {pred['age']}\nRace: {pred['race']}\n"
         else:
             info_text += f"Detected {len(faces)} faces.\n\n"
-            for i, (crop_img, face) in enumerate(zip(cropped_images, faces)):
-                pred = predictor.predict(crop_img)
-                
+            
+            # Batch predict
+            predictions = predictor.predict_batch(cropped_images)
+            
+            for i, (pred, crop_img, face) in enumerate(zip(predictions, cropped_images, faces)):
                 label = f"{pred['gender']}, {pred['age']}"
                 draw_bbox(output_image, face.bbox, f"{i+1}")
                 
@@ -79,32 +81,68 @@ def predict_single(image, use_face_detection):
 
     return output_image, info_text, crops
 
-def predict_batch(files, use_face_detection):
+def predict_batch_files(files, use_face_detection):
     if not files:
         return "No files selected."
         
     results_text = []
+    all_crops = []
+    tasks = [] # {filename, start_idx, count, faces, valid, error}
+    
+    # 1. Detect Faces
     for file in files:
+        task = {"filename": os.path.basename(file.name), "valid": False}
         try:
             image = Image.open(file.name).convert("RGB")
-            filename = os.path.basename(file.name)
-            results_text.append(f"--- {filename} ---")
+            task["valid"] = True
             
             if use_face_detection and FACE_DETECTION_AVAILABLE:
-                cropped_images, faces = face_detector.detect_and_crop_all(image, use_bbox=True, scale=1.2)
+                crops, faces = face_detector.detect_and_crop_all(image, use_bbox=True, scale=1.2)
                 if not faces:
-                    results_text.append("No faces detected.")
+                    task["count"] = 0
+                    task["message"] = "No faces detected"
                 else:
-                    for i, crop_img in enumerate(cropped_images):
-                        pred = predictor.predict(crop_img)
-                        results_text.append(f"Face {i+1}: {pred['gender']}, {pred['age']}, {pred['race']}")
+                    task["start_idx"] = len(all_crops)
+                    task["count"] = len(crops)
+                    all_crops.extend(crops)
             else:
-                pred = predictor.predict(image)
-                results_text.append(f"Result: {pred['gender']}, {pred['age']}, {pred['race']}")
-            
-            results_text.append("")
+                task["start_idx"] = len(all_crops)
+                task["count"] = 1
+                all_crops.append(image)
+                
         except Exception as e:
-            results_text.append(f"Error processing {file.name}: {e}")
+            task["valid"] = False
+            task["error"] = str(e)
+            
+        tasks.append(task)
+        
+    # 2. Batch Predict
+    if all_crops:
+        all_predictions = predictor.predict_batch(all_crops)
+    else:
+        all_predictions = []
+        
+    # 3. Format Results
+    for task in tasks:
+        results_text.append(f"--- {task['filename']} ---")
+        
+        if not task["valid"]:
+            results_text.append(f"Error: {task.get('error', 'Unknown error')}")
+        elif "message" in task:
+            results_text.append(task["message"])
+        else:
+            start = task["start_idx"]
+            count = task["count"]
+            preds = all_predictions[start : start + count]
+            
+            for i, pred in enumerate(preds):
+                if count > 1 or use_face_detection:
+                    prefix = f"Face {i+1}: "
+                else:
+                    prefix = "Result: "
+                results_text.append(f"{prefix}{pred['gender']}, {pred['age']}, {pred['race']}")
+                
+        results_text.append("")
             
     return "\n".join(results_text)
 
@@ -132,7 +170,7 @@ with gr.Blocks(title="GenderLM FairFace WebUI") as demo:
             batch_btn = gr.Button("Process Batch", variant="primary")
             batch_out = gr.Textbox(label="Batch Results", lines=20)
             
-            batch_btn.click(predict_batch, inputs=[files, batch_use_det], outputs=[batch_out])
+            batch_btn.click(predict_batch_files, inputs=[files, batch_use_det], outputs=[batch_out])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)

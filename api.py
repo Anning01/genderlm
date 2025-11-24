@@ -43,22 +43,25 @@ def health():
     }
 
 def process_image(image: Image.Image, use_face_detection: bool, return_face_image: bool):
-    results = []
-    
+    """
+    Process a single image: Detect faces -> Batch Predict -> Return results
+    """
     if use_face_detection and FACE_DETECTION_AVAILABLE:
         # Detect faces
         cropped_images, faces = face_detector.detect_and_crop_all(image, use_bbox=True, scale=1.2)
         
         if not faces:
-            # No faces found
             return {
                 "face_count": 0,
                 "faces": [],
                 "message": "No faces detected"
             }
-            
-        for i, crop_img in enumerate(cropped_images):
-            pred = predictor.predict(crop_img)
+        
+        # Batch predict for all faces in this image
+        predictions = predictor.predict_batch(cropped_images)
+        
+        results = []
+        for i, (pred, crop_img) in enumerate(zip(predictions, cropped_images)):
             face_res = {
                 "face_index": i,
                 "bbox": faces[i].bbox.tolist(),
@@ -67,16 +70,16 @@ def process_image(image: Image.Image, use_face_detection: bool, return_face_imag
             if return_face_image:
                 face_res["base64"] = image_to_base64(crop_img)
             results.append(face_res)
-
+            
         return {
             "face_count": len(faces),
             "faces": results
         }
     else:
-        # Direct prediction
+        # Direct prediction (treat whole image as one face)
         pred = predictor.predict(image)
         return {
-            "face_count": 1, # Treat whole image as one face/person
+            "face_count": 1,
             "faces": [{
                 "face_index": 0,
                 "bbox": [0, 0, image.width, image.height],
@@ -112,26 +115,104 @@ def predict_mult(
     if len(files) > 50:
         raise HTTPException(status_code=400, detail="Max 50 images allowed")
         
-    results = []
+    # 1. Prepare tasks
+    tasks = [] # {filename, image, valid, error, crops, faces}
+    all_crops = []
+    
+    # Read and Detect (Sequential or could be threaded, but stick to simple for now)
     for file in files:
+        task = {"filename": file.filename, "valid": False}
+        
         if not file.content_type.startswith("image/"):
-             results.append({
-                 "filename": file.filename,
-                 "error": "Not an image file"
-             })
-             continue
-             
+            task["error"] = "Not an image file"
+            tasks.append(task)
+            continue
+            
         try:
             contents = file.file.read()
             image = Image.open(io.BytesIO(contents)).convert("RGB")
-            res = process_image(image, use_face_detection, return_face_image)
-            res["filename"] = file.filename
-            results.append(res)
+            task["valid"] = True
+            task["image"] = image # Keep ref for base64 if needed
+            
+            if use_face_detection and FACE_DETECTION_AVAILABLE:
+                crops, faces = face_detector.detect_and_crop_all(image, use_bbox=True, scale=1.2)
+                task["crops"] = crops
+                task["faces"] = faces
+                
+                if crops:
+                    task["start_idx"] = len(all_crops)
+                    task["count"] = len(crops)
+                    all_crops.extend(crops)
+                else:
+                    task["count"] = 0
+                    task["message"] = "No faces detected"
+            else:
+                # No detection, predict whole image
+                task["crops"] = [image]
+                task["faces"] = None # No bbox info
+                task["start_idx"] = len(all_crops)
+                task["count"] = 1
+                all_crops.append(image)
+                
         except Exception as e:
+            task["valid"] = False
+            task["error"] = str(e)
+            
+        tasks.append(task)
+        
+    # 2. Batch Predict
+    if all_crops:
+        all_predictions = predictor.predict_batch(all_crops)
+    else:
+        all_predictions = []
+        
+    # 3. Assemble Results
+    results = []
+    for task in tasks:
+        if not task["valid"]:
             results.append({
-                "filename": file.filename,
-                "error": str(e)
+                "filename": task["filename"],
+                "error": task.get("error", "Unknown error")
             })
+            continue
+            
+        res = {
+            "filename": task["filename"],
+            "faces": []
+        }
+        
+        if "message" in task:
+            res["message"] = task["message"]
+            res["face_count"] = 0
+            results.append(res)
+            continue
+            
+        start = task["start_idx"]
+        count = task["count"]
+        task_preds = all_predictions[start : start + count]
+        crops = task["crops"]
+        faces = task["faces"]
+        
+        for i, pred in enumerate(task_preds):
+            face_info = {
+                "face_index": i,
+                "prediction": pred
+            }
+            
+            if faces:
+                face_info["bbox"] = faces[i].bbox.tolist()
+            else:
+                # Whole image case
+                w, h = task["image"].size
+                face_info["bbox"] = [0, 0, w, h]
+                
+            if return_face_image:
+                face_info["base64"] = image_to_base64(crops[i])
+                
+            res["faces"].append(face_info)
+            
+        res["face_count"] = len(res["faces"])
+        results.append(res)
             
     return results
 

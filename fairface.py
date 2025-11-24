@@ -42,58 +42,80 @@ class FairFacePredictor:
         model.eval()
         return model
 
-    def preprocess_image(self, image):
-        # Handle PIL Image
-        if isinstance(image, Image.Image):
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-        # Handle numpy array (OpenCV)
-        elif isinstance(image, np.ndarray):
-            image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        else:
-            raise ValueError("Unsupported image format")
+    def preprocess_batch(self, images):
+        """
+        Preprocess a list of images.
+        """
+        tensors = []
+        for img in images:
+            # Handle PIL Image
+            if isinstance(img, Image.Image):
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+            # Handle numpy array (OpenCV)
+            elif isinstance(img, np.ndarray):
+                img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            else:
+                raise ValueError("Unsupported image format")
             
-        return self.trans(image).unsqueeze(0)
+            tensors.append(self.trans(img))
+            
+        return torch.stack(tensors)
+
+    def predict_batch(self, images):
+        """
+        Predict attributes for a batch of face images.
+        """
+        if not images:
+            return []
+            
+        input_tensor = self.preprocess_batch(images)
+        
+        start_time = time.time()
+        with torch.no_grad():
+            outputs = self.model(input_tensor.to(self.device))
+            outputs = outputs.cpu().numpy()
+            
+        # Process batch outputs
+        results = []
+        inference_time_batch = (time.time() - start_time) * 1000
+        avg_time = inference_time_batch / len(images)
+        
+        def softmax(x):
+            e_x = np.exp(x - np.max(x))
+            return e_x / e_x.sum()
+
+        for output in outputs:
+            race_outputs = output[0:7]
+            gender_outputs = output[7:9]
+            age_outputs = output[9:18]
+            
+            race_idx = np.argmax(race_outputs)
+            gender_idx = np.argmax(gender_outputs)
+            age_idx = np.argmax(age_outputs)
+            
+            race_conf = float(softmax(race_outputs)[race_idx])
+            gender_conf = float(softmax(gender_outputs)[gender_idx])
+            age_conf = float(softmax(age_outputs)[age_idx])
+            
+            results.append({
+                "race": self.race_labels[race_idx],
+                "race_confidence": race_conf,
+                "gender": self.gender_labels[gender_idx],
+                "gender_confidence": gender_conf,
+                "age": self.age_labels[age_idx],
+                "age_confidence": age_conf,
+                "inference_time_ms": avg_time
+            })
+            
+        return results
 
     def predict(self, image):
         """
         Predict attributes for a single face image.
         """
-        input_tensor = self.preprocess_image(image)
-        
-        start_time = time.time()
-        with torch.no_grad():
-            outputs = self.model(input_tensor.to(self.device))
-            outputs = outputs.cpu().numpy().squeeze()
-            
-        race_outputs = outputs[0:7]
-        gender_outputs = outputs[7:9]
-        age_outputs = outputs[9:18]
-        
-        race_idx = np.argmax(race_outputs)
-        gender_idx = np.argmax(gender_outputs)
-        age_idx = np.argmax(age_outputs)
-        
-        # Calculate confidence (softmax)
-        def softmax(x):
-            e_x = np.exp(x - np.max(x))
-            return e_x / e_x.sum()
-            
-        race_conf = float(softmax(race_outputs)[race_idx])
-        gender_conf = float(softmax(gender_outputs)[gender_idx])
-        age_conf = float(softmax(age_outputs)[age_idx])
-        
-        inference_time = (time.time() - start_time) * 1000
-        
-        return {
-            "race": self.race_labels[race_idx],
-            "race_confidence": race_conf,
-            "gender": self.gender_labels[gender_idx],
-            "gender_confidence": gender_conf,
-            "age": self.age_labels[age_idx],
-            "age_confidence": age_conf,
-            "inference_time_ms": inference_time
-        }
+        # Re-use predict_batch for single image to maintain consistency
+        return self.predict_batch([image])[0]
 
 if __name__ == "__main__":
     # Test
