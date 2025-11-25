@@ -18,7 +18,7 @@ class FairFacePredictor:
         
         # Labels
         self.race_labels = ['White', 'Black', 'Latino', 'Asian', 'Southeast Asian', 'Indian', 'Middle Eastern']
-        self.gender_labels = ['Male', 'Female']
+        self.gender_labels = ['Female', 'Male']
         self.age_labels = ['0-2', '3-9', '10-19', '20-29', '30-39', '40-49', '50-59', '60-69', '70+']
         
         self.trans = transforms.Compose([
